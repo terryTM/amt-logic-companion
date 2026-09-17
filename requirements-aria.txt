@@ -1,0 +1,7 @@
+# Optional: the "Aria" model choice in the app (Apple Silicon, MLX).
+# aria pulls in ariautils from GitHub itself.
+-r requirements.txt
+aria @ git+https://github.com/EleutherAI/aria.git@4e9a8fb965b8d9481e2d280521aa98487723ce9a
+mlx==0.31.1
+mlx-metal==0.31.1
+jsonlines==4.0.0

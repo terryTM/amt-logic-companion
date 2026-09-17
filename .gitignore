@@ -1,0 +1,24 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Swift / Xcode
+app/.build/
+app/.swiftpm/
+*.xcodeproj/xcuserdata/
+DerivedData/
+
+# Music data: keep projects, sample packs and generated output out of the repo
+*.logicx/
+*.mid
+*.midi
+*.wav
+*.aif
+*.aiff
+*.caf
+*.bin
+
+# macOS
+.DS_Store
