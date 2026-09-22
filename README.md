@@ -2,7 +2,7 @@
 
 A macOS companion app that generates MIDI parts for a Logic Pro session with the
 [Anticipatory Music Transformer](https://github.com/jthickstun/anticipation)
-(AMT) or [Aria](https://github.com/EleutherAI/aria).
+(AMT).
 
 Drop a saved `.logicx` project (or a `.mid` file) onto the window. The app reads
 the note regions out of Logic's undocumented `ProjectData` file, lets you pick
@@ -15,7 +15,7 @@ The app only reads the project and never modifies it.
 
 ## Requirements
 
-- macOS 13 or later; Apple Silicon recommended (AMT runs on MPS, Aria on MLX)
+- macOS 13 or later; Apple Silicon recommended (AMT runs on MPS)
 - Swift 5.9+ (Xcode or the Command Line Tools)
 - Python 3.11
 
@@ -26,13 +26,11 @@ git clone https://github.com/<you>/amt-logic-companion.git
 cd amt-logic-companion
 
 python3.11 -m venv .venv
-.venv/bin/pip install -r requirements.txt        # AMT only
-.venv/bin/pip install -r requirements-aria.txt   # AMT + Aria (optional)
+.venv/bin/pip install -r requirements.txt
 ```
 
 Model weights download from Hugging Face on first use
-(`stanford-crfm/music-{small,medium,large}-800k`, and `loubb/aria-medium-base`
-for Aria).
+(`stanford-crfm/music-{small,medium,large}-800k`).
 
 ## Run the app
 
@@ -49,7 +47,6 @@ works from a clone without configuration. To use a different setup:
 | `AMT_PYTHON` | Python interpreter to use (default: `.venv/bin/python`, then `python3`) |
 | `AMT_PYTHON_DIR` | Folder containing the pipeline scripts (default: `python/`) |
 | `AMT_MODEL_SMALL` / `_MEDIUM` / `_LARGE` | Local directory for an AMT checkpoint instead of downloading it |
-| `ARIA_CHECKPOINT` | Local `model-gen.safetensors` for Aria |
 
 ## Command line
 
@@ -67,6 +64,12 @@ cd python
 
 # Anticipatory accompaniment: generate the first region, using the others as controls
 ../.venv/bin/python anticipatory.py Song.logicx --seed 42 --output accompaniment.mid
+
+# ...or pick the target and context regions, and override instrument labels
+# (GM program 0-127, 128 = drums); this is what the app runs in Accompany mode
+../.venv/bin/python anticipatory.py Song.logicx --target 23:0x002C0000 \
+    --parts 23:0x00300000 23:0x00440000 --instr 23:0x00440000=33 \
+    --output accompaniment.mid
 
 # Inspect the channel strip, instrument and patch behind each region
 ../.venv/bin/python logic_instruments.py Song.logicx
@@ -86,7 +89,7 @@ python/
   drum_detect.py        Drum detection from note content alone
   amt_pipeline.py       AMT continuation pipeline used by the app
   anticipatory.py       AMT anticipatory (accompaniment) generation
-  aria_pipeline.py      Aria generation (MLX)
+  instrument_assign.py  Instrument label per part (metadata, drums, placeholder)
   amt_compat.py         Sampling temperature for the stock anticipation package
   inject_midi.py        Experimental write-back into ProjectData
 tests/                  python -m unittest discover tests
@@ -95,11 +98,12 @@ tests/                  python -m unittest discover tests
 ## How parts are labelled for AMT
 
 AMT tokens combine instrument and pitch, and drums are their own instrument.
-Logic regions don't carry a MIDI program, so parts get placeholder programs,
-and a part whose notes look like drums (a General MIDI kit, or a sampler
-hi-hat loop with rolls) is routed to the drum channel instead. `drum_detect.py`
-is a heuristic; `logic_instruments.py` recovers the actual instrument from the
-project and is the more reliable source.
+Logic regions don't carry a MIDI program, so `instrument_assign.py` gives each
+part a label: from its channel strip (plug-in, patch or sample name, via
+`logic_instruments.py`) when possible, else drums if `drum_detect.py` finds a
+kit or hi-hat loop in the notes, else a distinct placeholder program. The app
+shows each label and its source, and any label can be changed from the track
+list before generating. Labels only affect what AMT sees, never the project.
 
 ## Reproducibility
 
@@ -114,6 +118,5 @@ include:
 
 - [anticipation](https://github.com/jthickstun/anticipation) (Apache-2.0),
   Thickstun et al., *Anticipatory Music Transformer*, TMLR 2024
-- [aria](https://github.com/EleutherAI/aria) (Apache-2.0), EleutherAI
 
 Model weights are covered by the terms on their Hugging Face model cards.

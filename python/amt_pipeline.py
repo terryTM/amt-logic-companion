@@ -116,8 +116,7 @@ def list_tracks(input_path, is_midi):
         regions = extract_midi.list_evsq_regions(data)
         # Deduplicate
         seen = set()
-        tracks = []
-        track_num = 0
+        kept = []
         for r in regions:
             notes_list = extract_midi.extract_midi_from_projectdata(
                 data, track_id=r['track_id'], sub_id=r['sub_id'])
@@ -127,6 +126,15 @@ def list_tracks(input_path, is_midi):
             if sig in seen:
                 continue
             seen.add(sig)
+            kept.append(dict(r, notes=notes_list))
+
+        from instrument_assign import DRUMS, assign_instruments
+        assigned = assign_instruments(input_path, kept)
+
+        tracks = []
+        track_num = 0
+        for r, instr in zip(kept, assigned):
+            notes_list = r['notes']
             track_num += 1
             # Compute duration in seconds
             if notes_list:
@@ -146,8 +154,11 @@ def list_tracks(input_path, is_midi):
                 mido.MetaMessage('end_of_track', time=0))
             note_track = mido.MidiTrack()
             tmp_mid.tracks.append(note_track)
-            program, channel = _logic_track_identity(
-                r['track_id'], r['sub_id'], track_num - 1, notes_list)
+            # Preview with the instrument AMT will see the part as.
+            _, channel = _logic_track_identity(slot=track_num - 1)
+            program = instr['instr']
+            if program == DRUMS:
+                program, channel = 0, 9
             note_track.append(
                 mido.Message('program_change', program=program,
                              channel=channel, time=0))
@@ -175,6 +186,9 @@ def list_tracks(input_path, is_midi):
                 "duration": round(dur_sec, 1),
                 "name": f"Track {track_num}",
                 "is_drum": channel == 9,
+                "instr": instr['instr'],
+                "instr_source": instr['source'],
+                "instr_evidence": instr['evidence'],
                 "type": "logicx",
                 "midi_path": midi_path,
             })

@@ -97,9 +97,20 @@ struct TrackInfo: Identifiable, Hashable {
     let trackId: Int?
     let subId: String?
     let duration: Double?
+    // AMT instrument label for a Logic region (GM program, 128 = drums),
+    // where it came from and why
+    var instr: Int? = nil
+    var instrSource: String? = nil
+    var instrEvidence: String? = nil
     // Preview
     let midiPath: String?
     var midiNotes: [MIDINote] = []
+
+    /// "track_id:sub_id", as anticipatory.py takes it
+    var regionKey: String? {
+        guard let tid = trackId, let sid = subId else { return nil }
+        return "\(tid):\(sid)"
+    }
 
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
     static func == (lhs: TrackInfo, rhs: TrackInfo) -> Bool { lhs.id == rhs.id }
@@ -171,6 +182,19 @@ func gmName(program: Int) -> String {
     return ""
 }
 
+/// Name of an AMT instrument label: a GM program, or 128 for drums.
+func instrName(_ instr: Int) -> String {
+    instr == 128 ? "Drums" : gmName(program: instr)
+}
+
+// Computed, not stored: main.swift globals initialize in file order, after
+// the app has already started running, so a stored one can be read empty.
+var gmFamilies: [String] {
+    ["Piano", "Chromatic Percussion", "Organ", "Guitar", "Bass", "Strings",
+     "Ensemble", "Brass", "Reed", "Pipe", "Synth Lead", "Synth Pad",
+     "Synth Effects", "Ethnic", "Percussive", "Sound Effects"]
+}
+
 class AppState: ObservableObject {
     @Published var inputPath: String?
     @Published var inputName: String = ""
@@ -180,13 +204,17 @@ class AppState: ObservableObject {
     @Published var tracks: [TrackInfo] = []
     @Published var selectedTrack: TrackInfo?
     @Published var loadingTracks: Bool = false
+    /// User-chosen instrument labels, by track id; they override the
+    /// inferred ones and only affect what AMT sees.
+    @Published var instrOverrides: [UUID: Int] = [:]
+    /// Generate the selected track around the others (anticipatory), rather
+    /// than continuing it alone.
+    @Published var accompany: Bool = true
 
     // Parameters
     @Published var numEvents: Double = 100
     @Published var topP: Double = 0.98
     @Published var temperature: Double = 1.20
-    @Published var promptSeconds: Double = 10
-    @Published var autoPrompt: Bool = true
     @Published var modelSize: String = "small"
 
     // Generation
@@ -218,6 +246,18 @@ class AppState: ObservableObject {
     @Published var instrumentPlaybackProgress: Double = 0
 
     private var playbackTimer: Timer?
+
+    func instr(for track: TrackInfo) -> Int? {
+        instrOverrides[track.id] ?? track.instr
+    }
+
+    /// Accompaniment needs a Logic project, AMT and at least one other part.
+    var canAccompany: Bool {
+        tracks.count > 1
+            && tracks.allSatisfy { $0.type == "logicx" }
+    }
+
+    var useAccompany: Bool { accompany && canAccompany }
 
     var outputPlayableDuration: Double {
         max(outputDuration - outputLeadInSec, 0)
@@ -648,6 +688,7 @@ struct FileInputSection: View {
         state.parsedNotes = []
         state.tracks = []
         state.selectedTrack = nil
+        state.instrOverrides = [:]
 
         // Load tracks via pipeline --list-tracks
         loadTracks(path: path)
@@ -696,7 +737,7 @@ struct FileInputSection: View {
                         midiNotes = []
                     }
 
-                    let track = TrackInfo(
+                    var track = TrackInfo(
                         name: name,
                         noteCount: noteCount,
                         type: type,
@@ -708,6 +749,9 @@ struct FileInputSection: View {
                         midiPath: midiPath,
                         midiNotes: midiNotes
                     )
+                    track.instr = item["instr"] as? Int
+                    track.instrSource = item["instr_source"] as? String
+                    track.instrEvidence = item["instr_evidence"] as? String
                     tracks.append(track)
                 }
             }
@@ -766,6 +810,10 @@ struct TrackSelectorSection: View {
                                 }
                                 .font(.system(size: 11))
                                 .foregroundColor(Theme.subtleText)
+
+                                if track.instr != nil {
+                                    InstrumentMenu(track: track)
+                                }
                             }
 
                             Spacer()
@@ -825,6 +873,64 @@ struct TrackSelectorSection: View {
 }
 
 
+/// Shows the instrument label AMT will read a Logic part as, why it was
+/// chosen, and lets the user change it.  Never changes the Logic project.
+struct InstrumentMenu: View {
+    @EnvironmentObject var state: AppState
+    let track: TrackInfo
+
+    var body: some View {
+        let current = state.instr(for: track) ?? 0
+        let edited = state.instrOverrides[track.id] != nil
+
+        HStack(spacing: 6) {
+            Menu {
+                Button("Drums") { set(128) }
+                ForEach(0..<16, id: \.self) { family in
+                    Menu(gmFamilies[family]) {
+                        ForEach(family * 8 ..< family * 8 + 8, id: \.self) { prog in
+                            Button("\(prog) \(gmName(program: prog))") { set(prog) }
+                        }
+                    }
+                }
+                if edited {
+                    Divider()
+                    Button("Reset to \(instrName(track.instr ?? 0))") {
+                        state.instrOverrides[track.id] = nil
+                    }
+                }
+            } label: {
+                Text("AMT: \(instrName(current))")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+
+            Text(sourceLabel(edited: edited))
+                .font(.system(size: 10))
+                .foregroundColor(edited ? Theme.accent : Theme.subtleText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(track.instrEvidence ?? "")
+        }
+    }
+
+    func set(_ instr: Int) {
+        state.instrOverrides[track.id] = instr == track.instr ? nil : instr
+    }
+
+    func sourceLabel(edited: Bool) -> String {
+        if edited { return "set by you" }
+        let why = track.instrEvidence ?? ""
+        switch track.instrSource {
+        case "metadata": return "from \(why)"
+        case "notes": return "guessed from notes"
+        default: return "placeholder (\(why))"
+        }
+    }
+}
+
+
 // MARK: - Parameters
 
 struct ParameterSection: View {
@@ -835,10 +941,29 @@ struct ParameterSection: View {
             VStack(alignment: .leading, spacing: 12) {
                 SectionHeader(title: "Parameters", icon: "slider.horizontal.3")
 
-                LabeledSlider(label: "Notes",
-                              value: $state.numEvents,
-                              range: 10...300, step: 10,
-                              format: "%.0f")
+                if state.canAccompany {
+                    HStack(spacing: 12) {
+                        Text("Mode")
+                            .font(.system(size: 12))
+                            .foregroundColor(Theme.bodyText)
+                            .frame(width: 70, alignment: .leading)
+                        Picker("", selection: $state.accompany) {
+                            Text("Accompany").tag(true)
+                            Text("Continue").tag(false)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .help("Accompany writes the selected part around the "
+                              + "other tracks; Continue extends it on its own.")
+                    }
+                }
+
+                if !state.useAccompany {
+                    LabeledSlider(label: "Notes",
+                                  value: $state.numEvents,
+                                  range: 10...300, step: 10,
+                                  format: "%.0f")
+                }
 
                 LabeledSlider(label: "Top-p",
                               value: $state.topP,
@@ -857,9 +982,9 @@ struct ParameterSection: View {
                         .frame(width: 70, alignment: .leading)
 
                     HStack(spacing: 0) {
-                        ForEach(["small", "medium", "large", "aria"], id: \.self) { size in
+                        ForEach(["small", "medium", "large"], id: \.self) { size in
                             let isActive = state.modelSize == size
-                            let label = size == "aria" ? "Aria" : size.capitalized
+                            let label = size.capitalized
                             Button(action: { state.modelSize = size }) {
                                 Text(label)
                                     .font(.system(size: 11, weight: isActive ? .semibold : .regular))
@@ -998,6 +1123,25 @@ struct GenerateSection: View {
             "amt_\(UUID().uuidString.prefix(8)).mid")
         let outputPath = outputFile.path
 
+        // Accompaniment: the selected region is generated, every other
+        // listed region is context, each read as its (possibly edited)
+        // instrument label.
+        var plan: AccompanimentPlan?
+        if state.useAccompany, let target = state.selectedTrack?.regionKey {
+            plan = AccompanimentPlan(
+                target: target,
+                parts: state.tracks.compactMap(\.regionKey).filter { $0 != target },
+                instruments: state.tracks.compactMap { t in
+                    guard let key = t.regionKey, let instr = state.instr(for: t)
+                    else { return nil }
+                    return "\(key)=\(instr)"
+                })
+        }
+        // anticipatory.py also writes the context; show and drag only the new part.
+        let resultPath = plan == nil
+            ? outputPath
+            : outputFile.deletingPathExtension().path + "_solo.mid"
+
         DispatchQueue.global().async {
             PipelineRunner.run(
                 inputPath: inputPath,
@@ -1005,9 +1149,9 @@ struct GenerateSection: View {
                 numEvents: Int(state.numEvents),
                 topP: state.topP,
                 temperature: state.temperature,
-                promptSeconds: nil,
                 modelSize: state.modelSize,
                 selectedTrack: state.selectedTrack,
+                accompaniment: plan,
                 onStage: { stage in
                     DispatchQueue.main.async { state.stage = stage }
                 },
@@ -1017,13 +1161,13 @@ struct GenerateSection: View {
                 onComplete: { success, errorMsg in
                     DispatchQueue.main.async {
                         state.isRunning = false
-                        if success && FileManager.default.fileExists(atPath: outputPath) {
+                        if success && FileManager.default.fileExists(atPath: resultPath) {
                             state.stage = .done
-                            let result = MIDIParser.fullParse(path: outputPath)
+                            let result = MIDIParser.fullParse(path: resultPath)
                             state.configureOutputPlayback(
-                                path: outputPath,
+                                path: resultPath,
                                 notes: result.notes,
-                                duration: MIDIParser.duration(path: outputPath)
+                                duration: MIDIParser.duration(path: resultPath)
                             )
                             state.instrumentTracks = MIDIParser.buildInstrumentTracks(from: result)
                         } else {
@@ -1040,6 +1184,13 @@ struct GenerateSection: View {
 
 // MARK: - Pipeline Runner
 
+/// Arguments for anticipatory.py, as "track_id:sub_id" region keys.
+struct AccompanimentPlan {
+    let target: String
+    let parts: [String]
+    let instruments: [String]   // "track_id:sub_id=program"
+}
+
 struct PipelineRunner {
     static func run(
         inputPath: String,
@@ -1047,30 +1198,26 @@ struct PipelineRunner {
         numEvents: Int,
         topP: Double,
         temperature: Double,
-        promptSeconds: Double?,
         modelSize: String,
         selectedTrack: TrackInfo?,
+        accompaniment: AccompanimentPlan? = nil,
         onStage: @escaping (GenerationStage) -> Void,
         onProgress: @escaping (String) -> Void,
         onComplete: @escaping (Bool, String) -> Void
     ) {
-        let isAria = modelSize == "aria"
-
         var args: [String]
-        if isAria {
-            let pipeline = PythonEnvironment.script("aria_pipeline.py")
-            let ariaDuration = max(10.0, Double(numEvents) / 5.0)
+        if let plan = accompaniment {
             args = [
-                pipeline, inputPath,
+                PythonEnvironment.script("anticipatory.py"), inputPath,
                 "--output", outputPath,
-                "--length", "2048",
-                "--max-duration", String(format: "%.0f", ariaDuration),
-                "--temp", String(format: "%.2f", temperature),
-                "--min-p", "0.035",
+                "--target", plan.target,
+                "--top-p", String(format: "%.2f", topP),
+                "--temperature", String(format: "%.2f", temperature),
+                "--model-size", modelSize,
+                "--device", "mps",
             ]
-            if let ps = promptSeconds {
-                args += ["--prompt-duration", String(format: "%.0f", ps)]
-            }
+            if !plan.parts.isEmpty { args += ["--parts"] + plan.parts }
+            for spec in plan.instruments { args += ["--instr", spec] }
         } else {
             let pipeline = PythonEnvironment.script("amt_pipeline.py")
             args = [
@@ -1085,7 +1232,7 @@ struct PipelineRunner {
                 "--device", "mps",
             ]
         }
-        if !isAria, let track = selectedTrack {
+        if accompaniment == nil, let track = selectedTrack {
             if track.type == "midi", let idx = track.index {
                 args += ["--midi-track", String(idx)]
             } else if track.type == "logicx" {
@@ -1122,9 +1269,9 @@ struct PipelineRunner {
                     onStage(.extracting)
                 } else if trimmed.contains("Stage 2:") || trimmed.contains("AMT token") || trimmed.contains("Extracted MIDI from Logic") {
                     onStage(.converting)
-                } else if trimmed.contains("Loading AMT model") || trimmed.contains("Loading Aria model") {
+                } else if trimmed.contains("Loading AMT model") {
                     onStage(.loadingModel)
-                } else if trimmed.contains("Stage 3:") || trimmed.contains("Generating with Aria") || (trimmed.contains("Generating") && trimmed.contains("notes")) {
+                } else if trimmed.contains("Stage 3:") || trimmed.hasPrefix("Generating accompaniment") || (trimmed.contains("Generating") && trimmed.contains("notes")) {
                     onStage(.generating)
                 } else if trimmed.contains("Stage 4:") {
                     onStage(.convertingOutput)

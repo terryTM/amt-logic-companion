@@ -17,7 +17,8 @@ Each source track is assigned a distinct General MIDI program so that
 extract_instruments() can split the token stream into (target, controls).
 
 Usage:
-    python anticipatory.py session.logicx --target-track 2
+    python anticipatory.py session.logicx --target 23:0x00500000 \
+        --parts 24:0x00510000 25:0x00520000 --instr 24:0x00510000=33
     python anticipatory.py multi.mid --target-instr 33
 """
 import os
@@ -153,16 +154,35 @@ def load_logicx_tracks(logicx_path, base_instr=0, debug=False):
     return out, meta['tempo']
 
 
+def fail(msg):
+    """Report on stdout, where the companion app looks for errors, and exit."""
+    print(msg)
+    sys.exit(1)
+
+
 def main():
     import argparse
 
     parser = argparse.ArgumentParser(
         description="Anticipatory accompaniment generation with AMT")
     parser.add_argument("input", help="Path to a .logicx project or .mid file")
-    parser.add_argument("--target-instr", type=int, default=0,
-                        help="GM program of the part to generate (default 0)")
+    parser.add_argument("--target-instr", type=int, default=None,
+                        help="Instrument of the part to generate: GM program "
+                             "0-127 or 128 for drums (MIDI input: default 0; "
+                             ".logicx: overrides the target's assignment)")
+    parser.add_argument("--target", metavar="TRACK:SUB",
+                        help=".logicx region to generate, as track_id:sub_id "
+                             "from --list-tracks (default: the first region)")
+    parser.add_argument("--parts", nargs="+", metavar="TRACK:SUB",
+                        help=".logicx regions to use as context "
+                             "(default: the next --max-regions - 1 regions)")
+    parser.add_argument("--instr", action="append", default=[],
+                        metavar="TRACK:SUB=PROG",
+                        help="Override a region's instrument (repeatable); "
+                             "PROG is a GM program 0-127 or 128 for drums")
     parser.add_argument("--max-regions", type=int, default=4,
-                        help="Cap on .logicx regions used as context")
+                        help="Cap on .logicx regions used when --parts is "
+                             "not given")
     parser.add_argument("--model-size", default="small",
                         choices=["small", "medium", "large"])
     parser.add_argument("--device", default="mps",
@@ -183,33 +203,70 @@ def main():
         random.seed(args.seed)
 
     print(f"Loading {args.input}")
-    if args.input.endswith(".logicx"):
+    if args.input.rstrip("/").endswith(".logicx"):
+        from instrument_assign import (DRUMS, assign_instruments,
+                                       parse_region_key, region_key)
         regions, tempo = load_logicx_tracks(args.input, debug=True)
-        regions = regions[:args.max_regions]
-        # One distinct GM program per pitched region so they can be split
-        # apart; detected drum regions share instrument 128, as in AMT.
+        by_key = {region_key(r['track_id'], r['sub_id']): r for r in regions}
+
+        def lookup(text):
+            key = region_key(*parse_region_key(text))
+            if key not in by_key:
+                fail(f"ERROR: no note region {text} in project")
+            return key
+
+        target_key = lookup(args.target) if args.target \
+            else region_key(regions[0]['track_id'], regions[0]['sub_id'])
+        if args.parts:
+            part_keys = [lookup(t) for t in args.parts]
+        else:
+            part_keys = [k for k in by_key if k != target_key]
+            part_keys = part_keys[:args.max_regions - 1]
+        keys = [target_key] + [k for k in dict.fromkeys(part_keys)
+                               if k != target_key]
+        chosen = [by_key[k] for k in keys]
+
+        # AMT reads each part through its instrument label: from the channel
+        # strip, the drum heuristic or a placeholder, unless the user
+        # overrode it.  Drums share instrument 128, as in AMT.
         # NOTE: regions are extracted on a per-region origin -- absolute
         # arrangement position is not yet recovered from ProjectData.
-        from drum_detect import classify_part
+        overrides = {}
+        for spec in args.instr:
+            k, prog = spec.split('=', 1)
+            overrides[lookup(k)] = int(prog)
+        if args.target_instr is not None:
+            overrides[target_key] = args.target_instr
+
         tracks = []
-        for i, r in enumerate(regions):
-            is_drum, why = classify_part(r['notes'])
-            if is_drum:
-                instr = 128
-            else:
-                instr = args.target_instr if i == 0 else 24 + i
-            print(f"  region {i}: instr {instr} ({why})")
+        for i, (k, r, a) in enumerate(zip(keys, chosen,
+                                          assign_instruments(args.input,
+                                                             chosen))):
+            instr = overrides.get(k, a['instr'])
+            if not 0 <= instr <= DRUMS:
+                fail(f"ERROR: instrument {instr} for {k} is not 0-128")
+            src = 'user' if k in overrides else a['source']
+            role = 'target' if i == 0 else 'context'
+            print(f"  {role} {k}: instr {instr} ({src}: {a['evidence']})")
             tracks.append({'instr': instr, 'notes': r['notes']})
+
         target = tracks[0]['instr']
-        if target == 128 and sum(t['instr'] == 128 for t in tracks) > 1:
-            print("  WARNING: target is drums and other drum regions share "
-                  "instrument 128; they cannot be used as controls.")
+        clash = [k for k, t in zip(keys[1:], tracks[1:])
+                 if t['instr'] == target]
+        if clash:
+            label = 'drums' if target == DRUMS else f'program {target}'
+            print(f"ERROR: context part {clash[0]} shares {label} with the "
+                  f"target, so AMT cannot tell them apart. Give one of them "
+                  f"a different instrument.")
+            return 1
         args.target_instr = target
         mid = build_multitrack_midi(tracks, tempo)
         print(f"  {len(tracks)} parts, tempo {tempo:.1f}")
     else:
         mid = mido.MidiFile(args.input)
         tempo = 120.0
+        if args.target_instr is None:
+            args.target_instr = 0
 
     events, controls, context = split_events(mid, args.target_instr, debug=True)
     if not controls:
@@ -235,7 +292,7 @@ def main():
         top_p=args.top_p, temperature=args.temperature, debug=args.debug)
 
     n_gen = len(generated) // 3
-    print(f"  generated {n_gen} events")
+    print(f"  Generated {n_gen} notes")
 
     combined = ops.combine(generated, controls)
     events_to_midi(combined).save(args.output)
