@@ -383,6 +383,13 @@ def load_model(device, model_size='small', debug=False):
             print(f"  Warning: {device} not available, falling back to CPU")
         model = model.to('cpu')
 
+    # One full forward pass per event instead of three (see kv_sample.py).
+    # AMT_NO_KV_CACHE=1 restores the original path, which is what the seed
+    # reproducibility note in the README refers to.
+    if os.environ.get("AMT_NO_KV_CACHE") != "1":
+        import kv_sample
+        kv_sample.enable(debug=debug)
+
     if debug:
         print(f"  Model loaded on {model.device}")
     return model

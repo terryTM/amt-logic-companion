@@ -47,6 +47,7 @@ works from a clone without configuration. To use a different setup:
 | `AMT_PYTHON` | Python interpreter to use (default: `.venv/bin/python`, then `python3`) |
 | `AMT_PYTHON_DIR` | Folder containing the pipeline scripts (default: `python/`) |
 | `AMT_MODEL_SMALL` / `_MEDIUM` / `_LARGE` | Local directory for an AMT checkpoint instead of downloading it |
+| `AMT_NO_KV_CACHE` | Set to `1` to sample without the KV cache (slower; see `python/kv_sample.py`) |
 
 ## Command line
 
@@ -110,6 +111,12 @@ list before generating. Labels only affect what AMT sees, never the project.
 `requirements.txt` pins the versions the demo was tested with. With those
 versions, a fixed `--seed` reproduces AMT output exactly. Newer torch or
 transformers releases run fine but sample different notes.
+
+Sampling reuses a KV cache across the three tokens of an event
+(`python/kv_sample.py`), which is what the model would have computed anyway but
+on a different kernel path, so logits differ by ~1e-3 in float32. In testing a
+fixed seed still reproduced the same notes, but it is no longer guaranteed to.
+Set `AMT_NO_KV_CACHE=1` to sample the original way.
 
 ## Acknowledgements and licenses
 
